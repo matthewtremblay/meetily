@@ -3,7 +3,6 @@ import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import { CalendarDays, ShieldCheck } from 'lucide-react';
 import { Switch } from '@/components/ui/switch';
-import { Input } from '@/components/ui/input';
 
 interface CalendarConnectionStatus {
   connected: boolean;
@@ -15,8 +14,6 @@ export function CalendarSettings() {
   const [connecting, setConnecting] = useState(false);
   const [status, setStatus] = useState<CalendarConnectionStatus>({ connected: false, scope: null });
   const [autoDetect, setAutoDetect] = useState(false);
-  const [clientId, setClientId] = useState('');
-  const [clientSecret, setClientSecret] = useState('');
 
   useEffect(() => {
     const load = async () => {
@@ -37,19 +34,10 @@ export function CalendarSettings() {
   }, []);
 
   const handleConnect = async () => {
-    if (!clientId.trim() || !clientSecret.trim()) {
-      toast.error('Client ID and Client Secret are required');
-      return;
-    }
-
     setConnecting(true);
     try {
-      const result = await invoke<CalendarConnectionStatus>('calendar_start_oauth', {
-        clientId: clientId.trim(),
-        clientSecret: clientSecret.trim(),
-      });
+      const result = await invoke<CalendarConnectionStatus>('calendar_start_oauth');
       setStatus(result);
-      setClientSecret('');
       toast.success('Google Calendar connected');
     } catch (error) {
       console.error('Failed to connect Google Calendar:', error);
@@ -146,35 +134,15 @@ export function CalendarSettings() {
             <div className="font-medium">Not connected</div>
           </div>
           <p className="text-sm text-gray-600">
-            Requires a Google Cloud project with the Calendar API enabled and an OAuth 2.0
-            Client ID of type &quot;Desktop app&quot;. Paste those credentials below, then sign in
-            when your browser opens.
+            Sign in with Google and approve read-only Calendar access. Meetily cannot edit your
+            events.
           </p>
-          <div className="space-y-2">
-            <label className="text-sm font-medium text-gray-700">Client ID</label>
-            <Input
-              value={clientId}
-              onChange={(e) => setClientId(e.target.value)}
-              placeholder="xxxxxxxxxxxx.apps.googleusercontent.com"
-              disabled={connecting}
-            />
-          </div>
-          <div className="space-y-2">
-            <label className="text-sm font-medium text-gray-700">Client Secret</label>
-            <Input
-              type="password"
-              value={clientSecret}
-              onChange={(e) => setClientSecret(e.target.value)}
-              placeholder="Client secret"
-              disabled={connecting}
-            />
-          </div>
           <button
             onClick={handleConnect}
             disabled={connecting}
             className="px-4 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors disabled:opacity-50"
           >
-            {connecting ? 'Waiting for sign-in in your browser…' : 'Connect Google Calendar'}
+            {connecting ? 'Waiting for Google sign-in…' : 'Sign in with Google'}
           </button>
         </div>
       )}

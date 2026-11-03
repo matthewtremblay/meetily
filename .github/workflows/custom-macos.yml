@@ -46,6 +46,11 @@ jobs:
           cp target/release/llama-helper frontend/src-tauri/binaries/llama-helper-aarch64-apple-darwin
           chmod +x frontend/src-tauri/binaries/llama-helper-aarch64-apple-darwin
 
+      - name: Run calendar and Meet detection tests
+        run: |
+          cargo test -p meetily managed_oauth_tests
+          cargo test -p meetily meet_detection::
+
       - name: Build ad-hoc signed app bundle
         working-directory: frontend
         run: pnpm tauri build --target aarch64-apple-darwin --bundles app

@@ -4,10 +4,10 @@ use crate::database::repositories::setting::SettingsRepository;
 use crate::state::AppState;
 use chrono::Duration;
 use log::info;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 
 #[derive(Debug, Serialize)]
 pub struct CalendarConnectionStatus {
@@ -21,14 +21,42 @@ pub struct CalendarConnectionStatus {
 /// up stray listener threads and open a new browser tab each time.
 static OAUTH_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
+#[derive(Debug, Deserialize)]
+struct ManagedOAuthClient {
+    client_id: String,
+    client_secret: String,
+}
+
+fn parse_managed_oauth_client(contents: &str) -> Result<ManagedOAuthClient, String> {
+    let client: ManagedOAuthClient = serde_json::from_str(contents)
+        .map_err(|e| format!("Invalid managed Google OAuth configuration: {}", e))?;
+    if client.client_id.trim().is_empty() || client.client_secret.trim().is_empty() {
+        return Err("Managed Google OAuth configuration is incomplete".to_string());
+    }
+    Ok(client)
+}
+
+async fn load_managed_oauth_client<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<ManagedOAuthClient, String> {
+    let path = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Could not locate Meetily app data: {}", e))?
+        .join("google-oauth-client.json");
+    let contents = tokio::fs::read_to_string(&path).await.map_err(|_| {
+        "Google sign-in is not configured for this Meetily installation. Contact the installer."
+            .to_string()
+    })?;
+    parse_managed_oauth_client(&contents)
+}
+
 /// Kick off the Google OAuth loopback flow: open the system browser for consent, catch the
 /// redirect locally, exchange the code for tokens, and persist them.
 #[tauri::command]
 pub async fn calendar_start_oauth<R: Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
-    client_id: String,
-    client_secret: String,
 ) -> Result<CalendarConnectionStatus, String> {
     if OAUTH_IN_PROGRESS
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -42,7 +70,10 @@ pub async fn calendar_start_oauth<R: Runtime>(
     }
 
     let pool = state.db_manager.pool().clone();
-    let result = run_oauth_flow(pool, client_id, client_secret).await;
+    let result = match load_managed_oauth_client(&app).await {
+        Ok(client) => run_oauth_flow(pool, client.client_id, client.client_secret).await,
+        Err(error) => Err(error),
+    };
     OAUTH_IN_PROGRESS.store(false, Ordering::SeqCst);
     result
 }
@@ -185,4 +216,27 @@ pub async fn api_save_meeting_calendar_metadata<R: Runtime>(
     }
 
     Ok(Some(matched.clone()))
+}
+
+#[cfg(test)]
+mod managed_oauth_tests {
+    use super::parse_managed_oauth_client;
+
+    #[test]
+    fn parses_managed_oauth_credentials() {
+        let parsed = parse_managed_oauth_client(
+            r#"{"client_id":"desktop-client","client_secret":"desktop-secret"}"#,
+        )
+        .expect("valid managed OAuth config");
+        assert_eq!(parsed.client_id, "desktop-client");
+        assert_eq!(parsed.client_secret, "desktop-secret");
+    }
+
+    #[test]
+    fn rejects_incomplete_managed_oauth_credentials() {
+        assert!(parse_managed_oauth_client(
+            r#"{"client_id":"desktop-client","client_secret":""}"#,
+        )
+        .is_err());
+    }
 }
