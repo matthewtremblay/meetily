@@ -6,7 +6,7 @@ use crate::database::repositories::setting::SettingsRepository;
 use crate::state::AppState;
 use log::{debug, info, warn};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// Consecutive "no Meet window" polls to wait through before auto-stopping, so a brief tab
@@ -18,7 +18,6 @@ const AUTO_START_RETRY_COOLDOWN: Duration = Duration::from_secs(60);
 /// How often to re-log the missing-permission warning — otherwise it fires every single 5s
 /// poll for as long as the toggle is on and permission isn't granted, drowning out other logs.
 const PERMISSION_WARNING_INTERVAL: Duration = Duration::from_secs(300);
-
 
 /// Spawns the background poller that watches for an active Google Meet call and auto
 /// starts/stops Meetily's existing recording pipeline. The loop always runs (one settings
@@ -105,8 +104,8 @@ pub fn spawn_meet_detection_task<R: Runtime>(app: AppHandle<R>) {
                 if currently_recording && !auto_started {
                     suppress_restart_until_absent = true;
                 }
-                let cooling_down = last_start_failure
-                    .is_some_and(|t| t.elapsed() < AUTO_START_RETRY_COOLDOWN);
+                let cooling_down =
+                    last_start_failure.is_some_and(|t| t.elapsed() < AUTO_START_RETRY_COOLDOWN);
                 if !currently_recording && !suppress_restart_until_absent && !cooling_down {
                     info!("Detected an active Google Meet call — auto-starting recording");
                     match recording_commands::start_recording_with_meeting_name(app.clone(), None)
@@ -142,6 +141,12 @@ pub fn spawn_meet_detection_task<R: Runtime>(app: AppHandle<R>) {
                         warn!("Auto-stop recording failed: {}", e);
                     } else {
                         auto_started = false;
+                        // Unlike the main-window Stop button, detector-driven stops have no
+                        // React click handler to run the save pipeline. Mirror the tray stop
+                        // path so the frontend persists the transcript and calendar metadata.
+                        if let Err(e) = app.emit("recording-stop-complete", true) {
+                            warn!("Failed to trigger post-recording save: {}", e);
+                        }
                     }
                 }
             } else {
