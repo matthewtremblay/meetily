@@ -1093,6 +1093,10 @@ pub async fn stop_recording<R: Runtime>(
     // Update tray menu to reflect stopped state
     crate::tray::update_tray_menu(&app);
 
+    // Manual and detector-driven stops share this path. Clear detector ownership
+    // only after the recording has stopped successfully.
+    crate::meet_detection::clear_auto_started();
+
     info!("🎉 Recording stopped successfully with ZERO transcript chunks lost");
     Ok(())
 }
