@@ -1,13 +1,10 @@
 pub mod commands;
 pub mod window_scan;
 
-use crate::audio::devices::{microphone, speakers};
 use crate::audio::recording_commands::{self, RecordingArgs};
-use crate::audio::recording_preferences;
 use crate::database::repositories::setting::SettingsRepository;
 use crate::state::AppState;
 use log::{debug, info, warn};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, Runtime};
 
@@ -22,39 +19,6 @@ const AUTO_START_RETRY_COOLDOWN: Duration = Duration::from_secs(60);
 /// poll for as long as the toggle is on and permission isn't granted, drowning out other logs.
 const PERMISSION_WARNING_INTERVAL: Duration = Duration::from_secs(300);
 
-/// Tracks whether the *current* recording was started by this detector, so auto-stop never
-/// touches a recording the user started manually for something other than a Meet call.
-static AUTO_STARTED_BY_DETECTION: AtomicBool = AtomicBool::new(false);
-
-/// Clear detector ownership after any successful stop path, including a manual stop.
-pub(crate) fn clear_auto_started() {
-    AUTO_STARTED_BY_DETECTION.store(false, Ordering::SeqCst);
-}
-
-/// Resolves which mic/system device names to record with, the same way the manual "Record"
-/// button's device selection ends up resolved before reaching the Rust side: prefer the user's
-/// saved device preference, falling back to the OS default. Unlike the manual flow, nothing in
-/// the frontend resolves this for an auto-triggered recording, so it has to happen here —
-/// passing `None`/`None` through leaves both mic and system audio unset and recording fails
-/// outright with "No audio streams could be created".
-async fn resolve_default_devices<R: Runtime>(app: &AppHandle<R>) -> (Option<String>, Option<String>) {
-    let prefs = recording_preferences::load_recording_preferences(app).await.ok();
-
-    // `parse_audio_device` (called downstream) requires the "(input)"/"(output)" suffix
-    // `AudioDevice`'s Display impl produces — a bare device name is rejected. Preferences are
-    // assumed to already be stored in that format, matching how the frontend saves them.
-    let mic_name = prefs
-        .as_ref()
-        .and_then(|p| p.preferred_mic_device.clone())
-        .or_else(|| microphone::default_input_device().ok().map(|d| d.to_string()));
-
-    let system_name = prefs
-        .as_ref()
-        .and_then(|p| p.preferred_system_device.clone())
-        .or_else(|| speakers::default_output_device().ok().map(|d| d.to_string()));
-
-    (mic_name, system_name)
-}
 
 /// Spawns the background poller that watches for an active Google Meet call and auto
 /// starts/stops Meetily's existing recording pipeline. The loop always runs (one settings
@@ -66,6 +30,8 @@ pub fn spawn_meet_detection_task<R: Runtime>(app: AppHandle<R>) {
         let mut last_start_failure: Option<Instant> = None;
         let mut last_permission_warning: Option<Instant> = None;
         let mut permission_requested = false;
+        let mut auto_started = false;
+        let mut suppress_restart_until_absent = false;
 
         loop {
             tokio::time::sleep(POLL_INTERVAL).await;
@@ -86,8 +52,13 @@ pub fn spawn_meet_detection_task<R: Runtime>(app: AppHandle<R>) {
                 }
             };
 
+            let currently_recording = recording_commands::is_recording().await;
+
             if !enabled {
                 consecutive_absent = 0;
+                if !currently_recording {
+                    auto_started = false;
+                }
                 continue;
             }
 
@@ -121,45 +92,41 @@ pub fn spawn_meet_detection_task<R: Runtime>(app: AppHandle<R>) {
                 .await
                 .unwrap_or(false);
             debug!("[meet-detect] poll: meet_active={}", meet_active);
-            let currently_recording = recording_commands::is_recording().await;
+
+            // A detector-owned recording that is no longer active was stopped manually or by an
+            // external path. Do not immediately restart it while the same Meet window remains.
+            if auto_started && !currently_recording {
+                auto_started = false;
+                suppress_restart_until_absent = true;
+            }
 
             if meet_active {
                 consecutive_absent = 0;
+                if currently_recording && !auto_started {
+                    suppress_restart_until_absent = true;
+                }
                 let cooling_down = last_start_failure
                     .is_some_and(|t| t.elapsed() < AUTO_START_RETRY_COOLDOWN);
-                if !currently_recording && !cooling_down {
-                    let (mic_name, system_name) = resolve_default_devices(&app).await;
-                    if mic_name.is_none() && system_name.is_none() {
-                        warn!(
-                            "[meet-detect] no microphone or system audio device available — \
-                             skipping auto-start"
-                        );
-                        last_start_failure = Some(Instant::now());
-                    } else {
-                        info!("Detected an active Google Meet call — auto-starting recording");
-                        match recording_commands::start_recording_with_devices_and_meeting(
-                            app.clone(),
-                            mic_name,
-                            system_name,
-                            None,
-                        )
+                if !currently_recording && !suppress_restart_until_absent && !cooling_down {
+                    info!("Detected an active Google Meet call — auto-starting recording");
+                    match recording_commands::start_recording_with_meeting_name(app.clone(), None)
                         .await
-                        {
-                            Ok(()) => {
-                                AUTO_STARTED_BY_DETECTION.store(true, Ordering::SeqCst);
-                                last_start_failure = None;
-                            }
-                            Err(e) => {
-                                warn!("Auto-start recording failed: {}", e);
-                                last_start_failure = Some(Instant::now());
-                            }
+                    {
+                        Ok(()) => {
+                            auto_started = true;
+                            last_start_failure = None;
+                        }
+                        Err(e) => {
+                            warn!("Auto-start recording failed: {}", e);
+                            last_start_failure = Some(Instant::now());
                         }
                     }
                 }
                 continue;
             }
 
-            if currently_recording && AUTO_STARTED_BY_DETECTION.load(Ordering::SeqCst) {
+            suppress_restart_until_absent = false;
+            if currently_recording && auto_started {
                 consecutive_absent += 1;
                 if consecutive_absent >= STOP_DEBOUNCE_POLLS {
                     info!("Google Meet call no longer detected — auto-stopping recording");
@@ -173,23 +140,16 @@ pub fn spawn_meet_detection_task<R: Runtime>(app: AppHandle<R>) {
                     .await
                     {
                         warn!("Auto-stop recording failed: {}", e);
+                    } else {
+                        auto_started = false;
                     }
                 }
             } else {
                 consecutive_absent = 0;
+                if !currently_recording {
+                    auto_started = false;
+                }
             }
         }
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn successful_manual_stop_clears_detector_ownership() {
-        AUTO_STARTED_BY_DETECTION.store(true, Ordering::SeqCst);
-        clear_auto_started();
-        assert!(!AUTO_STARTED_BY_DETECTION.load(Ordering::SeqCst));
-    }
 }

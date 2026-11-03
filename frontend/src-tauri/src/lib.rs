@@ -513,10 +513,6 @@ pub fn run() {
                 log::error!("Failed to create system tray: {}", e);
             }
 
-            // Start the Google Meet auto-detect poller (macOS only; no-op elsewhere).
-            // Gated behind the `auto_detect_meet_enabled` setting, checked on every poll,
-            // so toggling it in Settings takes effect without restarting the app.
-            meet_detection::spawn_meet_detection_task(_app.handle().clone());
 
             // Initialize notification system with proper defaults
             log::info!("Initializing notification system...");
@@ -591,6 +587,10 @@ pub fn run() {
                 database::setup::initialize_database_on_startup(&_app.handle()).await
             })
             .expect("Failed to initialize database");
+
+            // Start only after AppState and the database are ready. The poller is gated behind
+            // the auto-detect setting, which it re-reads on every cycle.
+            meet_detection::spawn_meet_detection_task(_app.handle().clone());
 
             // Initialize bundled templates directory for dynamic template discovery
             log::info!("Initializing bundled templates directory...");
