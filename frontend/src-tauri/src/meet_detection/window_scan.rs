@@ -19,9 +19,13 @@ const BROWSER_OWNER_NAMES: &[&str] = &[
 #[cfg(target_os = "macos")]
 fn looks_like_meet_call(title: &str) -> bool {
     // Observed live: Chrome titles an active Meet call "Meet – <call-code> 🔊" (en-dash, not a
-    // hyphen). Match on the "meet" prefix alone rather than the exact separator, since Google
-    // can change punctuation without notice and other browsers may render it differently.
-    title.to_lowercase().starts_with("meet")
+    // hyphen). Accept known separator variants without matching unrelated titles such as
+    // "Meeting notes - Google Docs".
+    let normalized = title.trim().to_lowercase();
+    let Some(suffix) = normalized.strip_prefix("meet") else {
+        return false;
+    };
+    suffix.starts_with(" – ") || suffix.starts_with(" - ") || suffix.starts_with(": ")
 }
 
 #[cfg(all(test, target_os = "macos"))]
