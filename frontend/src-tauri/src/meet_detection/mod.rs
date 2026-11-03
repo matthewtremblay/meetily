@@ -65,6 +65,7 @@ pub fn spawn_meet_detection_task<R: Runtime>(app: AppHandle<R>) {
         let mut consecutive_absent: u32 = 0;
         let mut last_start_failure: Option<Instant> = None;
         let mut last_permission_warning: Option<Instant> = None;
+        let mut permission_requested = false;
 
         loop {
             tokio::time::sleep(POLL_INTERVAL).await;
@@ -91,6 +92,18 @@ pub fn spawn_meet_detection_task<R: Runtime>(app: AppHandle<R>) {
             }
 
             if !crate::audio::permissions::check_window_title_read_permission() {
+                if !permission_requested {
+                    permission_requested = true;
+                    let granted = tokio::task::spawn_blocking(
+                        crate::audio::permissions::request_window_title_read_permission,
+                    )
+                    .await
+                    .unwrap_or(false);
+                    if granted {
+                        info!("[meet-detect] Screen Recording permission granted");
+                    }
+                }
+
                 let should_warn = last_permission_warning
                     .is_none_or(|t| t.elapsed() >= PERMISSION_WARNING_INTERVAL);
                 if should_warn {
@@ -101,6 +114,7 @@ pub fn spawn_meet_detection_task<R: Runtime>(app: AppHandle<R>) {
                     );
                     last_permission_warning = Some(Instant::now());
                 }
+                continue;
             }
 
             let meet_active = tokio::task::spawn_blocking(window_scan::scan_for_active_meet_call)
