@@ -26,6 +26,11 @@ const PERMISSION_WARNING_INTERVAL: Duration = Duration::from_secs(300);
 /// touches a recording the user started manually for something other than a Meet call.
 static AUTO_STARTED_BY_DETECTION: AtomicBool = AtomicBool::new(false);
 
+/// Clear detector ownership after any successful stop path, including a manual stop.
+pub(crate) fn clear_auto_started() {
+    AUTO_STARTED_BY_DETECTION.store(false, Ordering::SeqCst);
+}
+
 /// Resolves which mic/system device names to record with, the same way the manual "Record"
 /// button's device selection ends up resolved before reaching the Rust side: prefer the user's
 /// saved device preference, falling back to the OS default. Unlike the manual flow, nothing in
@@ -144,7 +149,6 @@ pub fn spawn_meet_detection_task<R: Runtime>(app: AppHandle<R>) {
                 consecutive_absent += 1;
                 if consecutive_absent >= STOP_DEBOUNCE_POLLS {
                     info!("Google Meet call no longer detected — auto-stopping recording");
-                    AUTO_STARTED_BY_DETECTION.store(false, Ordering::SeqCst);
                     consecutive_absent = 0;
                     if let Err(e) = recording_commands::stop_recording(
                         app.clone(),
@@ -162,4 +166,16 @@ pub fn spawn_meet_detection_task<R: Runtime>(app: AppHandle<R>) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn successful_manual_stop_clears_detector_ownership() {
+        AUTO_STARTED_BY_DETECTION.store(true, Ordering::SeqCst);
+        clear_auto_started();
+        assert!(!AUTO_STARTED_BY_DETECTION.load(Ordering::SeqCst));
+    }
 }

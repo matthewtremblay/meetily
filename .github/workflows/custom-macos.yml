@@ -1,0 +1,69 @@
+name: Build custom Meetily macOS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-macos-arm64:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+          key: custom-meetily-macos-arm64
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Build local summary sidecar
+        run: cargo build --release -p llama-helper --features metal
+
+      - name: Stage sidecar for Tauri
+        run: |
+          mkdir -p frontend/src-tauri/binaries
+          cp target/release/llama-helper frontend/src-tauri/binaries/llama-helper-aarch64-apple-darwin
+          chmod +x frontend/src-tauri/binaries/llama-helper-aarch64-apple-darwin
+
+      - name: Build ad-hoc signed app bundle
+        working-directory: frontend
+        run: pnpm tauri build --target aarch64-apple-darwin --bundles app
+
+      - name: Verify and archive app
+        run: |
+          APP=target/aarch64-apple-darwin/release/bundle/macos/meetily.app
+          test -d "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" meetily-custom-macos-arm64.zip
+          shasum -a 256 meetily-custom-macos-arm64.zip > meetily-custom-macos-arm64.zip.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: meetily-custom-macos-arm64
+          path: |
+            meetily-custom-macos-arm64.zip
+            meetily-custom-macos-arm64.zip.sha256
+          if-no-files-found: error
+          retention-days: 14

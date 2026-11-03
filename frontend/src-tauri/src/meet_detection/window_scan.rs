@@ -24,6 +24,25 @@ fn looks_like_meet_call(title: &str) -> bool {
     title.to_lowercase().starts_with("meet")
 }
 
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::looks_like_meet_call;
+
+    #[test]
+    fn recognizes_active_meet_title_variants() {
+        assert!(looks_like_meet_call("Meet – abc-defg-hij 🔊"));
+        assert!(looks_like_meet_call("Meet - Weekly Sync"));
+        assert!(looks_like_meet_call("meet: Product Team"));
+    }
+
+    #[test]
+    fn ignores_unrelated_browser_titles() {
+        assert!(!looks_like_meet_call("Google Calendar"));
+        assert!(!looks_like_meet_call("Meeting notes - Google Docs"));
+        assert!(!looks_like_meet_call("Zoom Workplace"));
+    }
+}
+
 /// Returns `true` if a browser window's title currently looks like an active Google Meet call.
 /// Requires the real macOS Screen Recording permission (not the Core Audio "Audio Capture"
 /// permission this app already requests elsewhere) — without it, CGWindowListCopyWindowInfo

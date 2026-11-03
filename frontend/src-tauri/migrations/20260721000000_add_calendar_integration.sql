@@ -11,4 +11,5 @@ ALTER TABLE meetings ADD COLUMN calendar_end_time TEXT;
 ALTER TABLE settings ADD COLUMN googleCalendarConfig TEXT;
 
 -- Phase B toggle: auto-start/stop recording on detected Google Meet calls
-ALTER TABLE settings ADD COLUMN autoDetectMeetEnabled INTEGER DEFAULT 0;
+-- This private build is explicitly calendar/Meet-enabled for Matt's work Mac.
+ALTER TABLE settings ADD COLUMN autoDetectMeetEnabled INTEGER DEFAULT 1;
