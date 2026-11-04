@@ -2,7 +2,7 @@ use crate::calendar::{client, matcher, oauth, CalendarEvent};
 use crate::database::repositories::meeting::MeetingsRepository;
 use crate::database::repositories::setting::SettingsRepository;
 use crate::state::AppState;
-use chrono::Duration;
+use chrono::{DateTime, Duration, Utc};
 use log::info;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -146,6 +146,51 @@ pub async fn calendar_get_connection_status<R: Runtime>(
     })
 }
 
+fn select_current_event(events: &[CalendarEvent], now: DateTime<Utc>) -> Option<CalendarEvent> {
+    let tolerance = Duration::minutes(15);
+    events
+        .iter()
+        .filter(|event| event.start_time <= now + tolerance && event.end_time >= now - tolerance)
+        .min_by_key(|event| {
+            if event.start_time <= now && event.end_time >= now {
+                0
+            } else {
+                (event.start_time - now).num_seconds().abs()
+            }
+        })
+        .cloned()
+}
+
+/// Return the Calendar event that is active or about to start so a recording can use the real
+/// event title instead of a timestamp-generated placeholder.
+#[tauri::command]
+pub async fn calendar_get_current_event<R: Runtime>(
+    _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<CalendarEvent>, String> {
+    let pool = state.db_manager.pool();
+    let config = SettingsRepository::get_google_calendar_config(pool)
+        .await
+        .map_err(|e| format!("Failed to read Google Calendar config: {}", e))?;
+    let Some(config) = config.filter(|c| c.is_connected()) else {
+        return Ok(None);
+    };
+
+    let access_token = oauth::ensure_valid_access_token(pool, &config)
+        .await
+        .map_err(|e| format!("Failed to refresh Google Calendar access token: {}", e))?;
+    let now = Utc::now();
+    let events = client::list_meet_events(
+        &access_token,
+        now - Duration::minutes(30),
+        now + Duration::minutes(30),
+    )
+    .await
+    .map_err(|e| format!("Failed to fetch current Google Calendar event: {}", e))?;
+
+    Ok(select_current_event(&events, now))
+}
+
 /// Match a just-recorded meeting against Google Calendar and write attendee/title/meet-link
 /// metadata onto its row. Called by the frontend right after a transcript (and thus the
 /// meeting row) has been saved — meeting rows don't exist until then (see recording_commands.rs).
@@ -220,7 +265,21 @@ pub async fn api_save_meeting_calendar_metadata<R: Runtime>(
 
 #[cfg(test)]
 mod managed_oauth_tests {
-    use super::parse_managed_oauth_client;
+    use super::{parse_managed_oauth_client, select_current_event};
+    use crate::calendar::CalendarEvent;
+    use chrono::{Duration, TimeZone, Utc};
+
+    fn event(id: &str, title: &str, start_offset: i64, end_offset: i64) -> CalendarEvent {
+        let now = Utc.with_ymd_and_hms(2026, 11, 4, 15, 0, 0).unwrap();
+        CalendarEvent {
+            id: id.to_string(),
+            title: title.to_string(),
+            start_time: now + Duration::minutes(start_offset),
+            end_time: now + Duration::minutes(end_offset),
+            meet_link: Some(format!("https://meet.google.com/{}", id)),
+            attendees: vec![],
+        }
+    }
 
     #[test]
     fn parses_managed_oauth_credentials() {
@@ -234,9 +293,26 @@ mod managed_oauth_tests {
 
     #[test]
     fn rejects_incomplete_managed_oauth_credentials() {
-        assert!(parse_managed_oauth_client(
-            r#"{"client_id":"desktop-client","client_secret":""}"#,
-        )
-        .is_err());
+        assert!(
+            parse_managed_oauth_client(r#"{"client_id":"desktop-client","client_secret":""}"#,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn current_calendar_event_prefers_active_meeting_title() {
+        let now = Utc.with_ymd_and_hms(2026, 11, 4, 15, 0, 0).unwrap();
+        let events = vec![
+            event("upcoming", "Next Call", 10, 40),
+            event("active", "Customer Review", -20, 20),
+        ];
+        let selected = select_current_event(&events, now).expect("current event");
+        assert_eq!(selected.title, "Customer Review");
+    }
+
+    #[test]
+    fn current_calendar_event_rejects_distant_events() {
+        let now = Utc.with_ymd_and_hms(2026, 11, 4, 15, 0, 0).unwrap();
+        assert!(select_current_event(&[event("later", "Later", 20, 50)], now).is_none());
     }
 }

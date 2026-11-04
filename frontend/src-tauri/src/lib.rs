@@ -626,6 +626,7 @@ pub fn run() {
             calendar::commands::calendar_start_oauth,
             calendar::commands::calendar_disconnect,
             calendar::commands::calendar_get_connection_status,
+            calendar::commands::calendar_get_current_event,
             calendar::commands::api_save_meeting_calendar_metadata,
             meet_detection::commands::calendar_toggle_auto_detect,
             meet_detection::commands::calendar_get_auto_detect_enabled,
